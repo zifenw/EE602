@@ -1,0 +1,442 @@
+# ECEN 602 - Mini Project 3: TFTP Server
+
+### Team Members
+
+| Name | Responsibility |
+|---|---|
+| **Zifeng Wang** | Server coding, Makefile, and test cases |
+| **Branden Sauceda** | code debugging, test cases, and README |
+
+## 1. Overview
+
+This project implements a Trivial File Transfer Protocol (TFTP) server using UDP sockets in C++. The server supports Read Request (RRQ), allowing clients to download files from the server.
+
+The server supports the `octet` and `netascii` transfer modes. It uses the TFTP stop-and-wait mechanism, with DATA packets of up to 512 bytes, block-number sequencing, acknowledgments, retransmissions, and timeout handling.
+
+## 2. Features
+
+- UDP-based TFTP server.
+- RRQ support for downloading files.
+- `octet` mode for binary file transfers.
+- `netascii` mode for text file transfers.
+- 512-byte TFTP DATA blocks.
+- Stop-and-wait transfer with ACK validation.
+- Retransmission of DATA packets after a timeout.
+- Transfer termination after repeated timeouts.
+- Concurrent clients handled using `fork()`.
+- A separate UDP socket and server port for each child process.
+- TFTP error handling for requests that cannot be processed.
+- Netascii newline and carriage-return conversion, including conversions that cross DATA block boundaries.
+
+Write Request (WRQ) is not implemented.
+
+## 3. Architecture
+
+The server consists of a parent process and child processes.
+
+1. **Parent process:** Creates a UDP socket, binds it to the port specified on the command line, and waits for RRQ packets.
+2. **Request handling:** When an RRQ arrives, the parent creates a child process using `fork()`.
+3. **Child process:** Creates and binds a new UDP socket to an operating-system-assigned port. It handles the requested file transfer independently of the parent.
+4. **Data transfer:** The child sends numbered DATA packets and waits for the corresponding ACK packets. It sends the next DATA packet only after receiving the expected acknowledgment.
+5. **Timeout handling:** If an ACK is not received before the timeout, the child retransmits the last DATA packet. After repeated timeouts, the child terminates the transfer and exits.
+6. **File access:** The server looks for requested files in its current working directory. File requests containing directory paths are not accepted.
+
+The parent remains available to receive additional requests while child processes handle existing transfers.
+
+## 4. Build and Run
+
+### Requirements
+
+- A standard Linux development environment.
+- A C++ compiler.
+- `make`.
+- A TFTP client that supports specifying a non-default server port.
+
+### Compile
+
+From the project directory, run:
+
+```bash
+make
+```
+
+### Start the server
+
+For testing, use the `testfiles` directory as the server's working directory:
+
+```bash
+cd testfiles
+../server 9000
+```
+
+The server should display a message indicating that it is listening on port 9000.
+
+**Important:** The server serves files relative to its current working directory, not necessarily the directory containing the executable. Run the server from the directory containing the test files.
+
+### Download a file
+
+In a separate terminal, connect a TFTP client to the server at `localhost`, port `9000`, and download a file. For example, using the Linux interactive TFTP client:
+
+```text
+tftp localhost 9000
+tftp> mode octet
+tftp> get test2047.bin
+tftp> quit
+```
+
+For a text file, use netascii mode:
+
+```text
+tftp localhost 9000
+tftp> mode netascii
+tftp> get netascii_test.txt
+tftp> quit
+```
+
+TFTP client command syntax may vary by system. If the client does not accept the port in the connection command, use its supported command-line port option or interactive `connect` command.
+
+Downloaded files are saved in the client's local working directory.
+
+## 5. Test Procedures and Results
+
+Tests were performed on Linux using the server and a standard TFTP client. File comparisons were performed with `cmp`; no output from `cmp` indicates that the compared files matched.
+
+### Test 1: Short text file
+
+**Procedure**
+1. Start the server from the `testfiles` directory.
+2. Download `hello.txt` using the TFTP client.
+3. Compare the downloaded file with the original.
+
+**Comparison command**
+
+```bash
+cmp testfiles/hello.txt downloads/hello.txt
+```
+
+**Status:** Include as passed only if the download and comparison were completed successfully.
+
+### Test 2: Binary transfer with 2047 bytes
+
+**Procedure**
+1. Download `test2047.bin` in octet mode.
+2. Compare the downloaded file against the original.
+
+```bash
+cmp testfiles/test2047.bin downloads/test2047.bin
+```
+
+**Result:** Passed. The downloaded file matched the source file.
+
+### Test 3: Binary transfer with 2048 bytes
+
+**Procedure**
+1. Download `test2048.bin` in octet mode.
+2. Compare the downloaded file against the original.
+
+```bash
+cmp testfiles/test2048.bin downloads/test2048.bin
+```
+
+**Result:** Passed. The downloaded file matched the source file.
+
+### Test 4: Netascii text transfer
+
+**Procedure**
+1. Download `netascii_test.txt` in netascii mode.
+2. Compare the downloaded file against the original.
+
+```bash
+cmp testfiles/netascii_test.txt downloads/netascii_test.txt
+```
+
+**Result:** Passed. The downloaded file matched the original after netascii conversion.
+
+### Test 5: Netascii conversion across a DATA-block boundary
+
+**Test data:** `netascii_boundary.txt` contains 511 `A` characters, followed by a newline and a `B`.
+
+**Procedure**
+1. Download the file in netascii mode.
+2. Compare the downloaded file with the original.
+
+```bash
+cmp testfiles/netascii_boundary.txt downloads/netascii_boundary.txt
+```
+
+**Result:** Passed. This test checks that newline conversion is handled correctly when the converted data crosses a 512-byte DATA-block boundary.
+
+### Test 6: Large binary file and block-number wraparound
+
+**Procedure**
+1. Generate a binary test file larger than 32 MiB.
+2. Download the file in octet mode.
+3. Compare the downloaded file with the original.
+
+Example file generation command:
+
+```bash
+dd if=/dev/zero of=test34MB.bin bs=1M count=34 status=progress
+```
+
+Comparison command:
+
+```bash
+cmp testfiles/test34MB.bin downloads/test34MB.bin
+```
+
+**Result:** Passed. The 34 MiB file was downloaded and matched the source file, exercising DATA block-number wraparound.
+
+### Test 7: Concurrent clients
+
+**Procedure**
+1. Start the server.
+2. Initiate downloads from two clients concurrently.
+3. Download `test2048.bin` in octet mode and `netascii_boundary.txt` in netascii mode.
+4. Compare both downloaded files with their respective source files.
+
+**Result:** Two simultaneous client transfers were tested successfully. Three simultaneous clients, as specified in the assignment, have not been confirmed by the recorded tests.
+
+### Test 8: Client termination and timeout handling
+
+**Procedure**
+1. Start a transfer of a large file.
+2. Terminate the client before the transfer completes.
+3. Observe the server output.
+
+**Expected behavior:** The child process retransmits DATA packets after timeouts and exits after the configured retry limit is reached.
+
+**Observed output:**
+
+```text
+Client timed out; PID ...
+```
+
+**Result:** Timeout termination was observed in the server logs. The logs alone do not establish the exact number of retransmissions, so the full ten-timeout sequence should be confirmed if required.
+
+### Test 9: Request for a nonexistent file
+
+**Procedure**
+1. Start the server from the `testfiles` directory.
+2. Connect using a TFTP client in octet mode.
+3. Request a file that does not exist.
+
+```text
+tftp> mode octet
+tftp> get nonexistent_xyz.bin
+Error code 1: File not found
+```
+
+**Result:** Passed. The server returned a TFTP ERROR response with error code 1 (File not found) when the client requested a nonexistent file. The request was rejected rather than transferring a file.
+
+
+## 6. Error Handling and Limitations
+
+- The server supports RRQ only; WRQ is not implemented.
+- TFTP transfer options beyond the required transfer modes are not supported.
+- Files are served relative to the server's current working directory.
+- Requests containing directory paths are rejected.
+- The server uses a timeout and retry mechanism to recover from lost DATA or ACK packets.
+- The tests recorded so far confirm binary transfer, netascii transfer, boundary conversion, large-file transfer, two-client concurrency, and observed timeout termination.
+- Three-client concurrency, the exact timeout retry count, and the client's response to a nonexistent file should be verified before claiming that all assignment tests have passed.
+
+## 7. Cleanup Before Submission
+
+Stop the running server with `Ctrl+C`.
+
+From the project directory, clean generated build artifacts:
+
+```bash
+cd ..
+make clean
+```
+
+Check that the `clean` target in the Makefile removes the server executable and any object files.
+
+Remove downloaded test copies and generated test artifacts that are not required for grading. Keep the source code, Makefile, README, and any small test fixtures needed to demonstrate the implementation.
+
+Before submitting, verify that the project can be rebuilt with `make` on a standard Linux system.
+
+## 8. Files Included
+
+- `server.cpp` — TFTP server implementation.
+- `Makefile` — build and cleanup rules.
+- `README` — project description, usage instructions, test procedures, and limitations.
+- `testfiles/` — test files used for local verification, if included in the submission.
+
+
+
+# Appendix: Terminal Test Logs
+
+This appendix records the terminal commands and outputs used to build, run, and test the TFTP server. The logs are organized by test case. Some interactive prompts and interrupted commands are omitted where they do not affect the test results.
+
+```text
+
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ make clean
+rm -f server *.o
+bash-4.4$ make
+g++ -Wall -Wextra -std=c++17 -O2 -o server server.cpp
+bash-4.4$ make clean
+rm -f server *.o
+bash-4.4$ make
+g++ -Wall -Wextra -std=c++17 -O2 -o server server.cpp
+bash-4.4$ ../server 9000
+bash: ../server: No such file or directory
+bash-4.4$ ls
+Makefile  README  downloads  server  server.cpp  server.cpp.save  testfiles
+bash-4.4$ ./server 9000
+TFTP server listening on port 9000
+RRQ: test2047.bin from 127.0.0.1:33405 mode=octet
+RRQ: test2048.bin from 127.0.0.1:33405 mode=octet
+^C
+bash-4.4$ pwd
+/home/grads/z/zifenw/EE602/MP3
+bash-4.4$ ls -l test2047.bin test2048.bin
+ls: cannot access 'test2047.bin': No such file or directory
+ls: cannot access 'test2048.bin': No such file or directory
+bash-4.4$ cd ~/EE602/MP3/testfiles
+bash-4.4$ ../server 9000
+TFTP server listening on port 9000
+RRQ: test2047.bin from 127.0.0.1:42997 mode=octet
+RRQ: test2048.bin from 127.0.0.1:42997 mode=octet
+RRQ: netascii_test.txt from 127.0.0.1:44918 mode=netascii
+RRQ: netascii_boundary.txt from 127.0.0.1:60898 mode=netascii
+RRQ: test2048.bin from 127.0.0.1:49368 mode=octet
+RRQ: netascii_boundary.txt from 127.0.0.1:38337 mode=netascii
+RRQ: test34MB.bin from 127.0.0.1:55998 mode=octet
+RRQ: test34MB.bin from 127.0.0.1:55998 mode=octet
+Client timed out; PID 3049981
+RRQ: test34MB.bin from 127.0.0.1:55998 mode=octet
+Client timed out; PID 3080919
+RRQ: nonexistent_xyz.bin from 127.0.0.1:55998 mode=octet
+RRQ: test34MB.bin from 127.0.0.1:55998 mode=octet
+```
+
+```text
+bash-4.4$ cd ~/EE602/MP3/downloads
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode octet
+tftp> get test2047.bin
+Error code 1: File not found
+tftp> get test2048.bin
+Error code 1: File not found
+tftp> quit
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode octet
+tftp> get test2047.bin
+tftp> get test2048.bin
+tftp> quit
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ cmp testfiles/test2047.bin downloads/test2047.bin
+bash-4.4$ cmp testfiles/test2048.bin downloads/test2048.bin
+bash-4.4$ python3 - <<'PY'
+> with open("netascii_test.txt", "wb") as f:
+>     f.write(b"Hello\nWorld\rEnd\n")
+> PY
+bash-4.4$ od -An -tx1 -c netascii_test.txt
+  48  65  6c  6c  6f  0a  57  6f  72  6c  64  0d  45  6e  64  0a
+   H   e   l   l   o  \n   W   o   r   l   d  \r   E   n   d  \n
+bash-4.4$ cd ~/EE602/MP3/downloads
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode netascii
+tftp> get netascii_test.txt
+tftp> quit
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ cmp testfiles/netascii_test.txt downloads/netascii_test.txt
+bash-4.4$ python3 - <<'PY'
+> with open("netascii_boundary.txt", "wb") as f:
+>     f.write(b"A" * 511 + b"\n" + b"B")
+> PY
+bash-4.4$ cd ~/EE602/MP3/downloads
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode netascii
+tftp> get netascii_boundary.txt
+tftp> quit
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ cmp testfiles/netascii_boundary.txt downloads/netascii_boundary.txt
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ mkdir -p downloads/client1 downloads/client2
+bash-4.4$ cd ~/EE602/MP3/downloads/client1
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode octet
+tftp> get test2048.bin
+tftp> quit
+bash-4.4$ cd ~/EE602/MP3
+ status=progress/dev/zero of=test34MB.bin bs=1M count=34 
+34+0 records in
+34+0 records out
+35651584 bytes (36 MB, 34 MiB) copied, 0.0899594 s, 396 MB/s
+ status=progress/dev/zero of=test34MB.bin bs=1M count=34 
+34+0 records in
+34+0 recor^C
+bash-4.4$ cd ~/EE602/MP3/downloads
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode octet
+tftp> get test34MB.bin
+tftp> get test34MB.bin
+^C
+tftp> get test34MB.bin
+^C
+tftp> mode octet
+tftp> get nonexistent_xyz.bin
+Error code 1: File not found
+bash-4.4$  octet
+bash-4.4$ test34MB.bin /test34MB.bin downloads/test34MB.bin
+bash-4.4$ ^C          stest34MB.bin downloads/test34MB.bin
+bash-4.4$ ^C ~/EE602/etest34MB.bin downloads/test34MB.bin
+bash-4.4$ ^Cp testfiltest34MB.bin downloads/test34MB.bin 
+binh-4.4$ cmp testfiles/test34MB.bin downloads/test34MB.b
+bash-4.4$ python3 - <<'PY'
+> with open("netascii_boundary.txt", "wb") as f:
+>     f.write(b"A" * 511 + b"\n" + b"B")
+> PY
+bash-4.4$ python3 - <<'PY'
+> with open("netascii_cr_test.txt", "wb") as f:
+>     f.write(b"First\rSecond\rThird\n")
+> PY
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ ls -la
+total 262
+drwx------. 4 zifenw 1001409   156 Oct 29 12:33 .
+drwx------. 6 zifenw 1001409   113 Oct 28 10:32 ..
+-rwx------. 1 zifenw 1001409   151 Oct 28 10:35 Makefile
+-rwx------. 1 zifenw 1001409  3157 Oct 29 12:31 README
+drwx------. 4 zifenw 1001409   251 Oct 29 12:28 downloads
+-rwx--x--x. 1 zifenw 1001409 30024 Oct 29 10:16 server
+-rwx------. 1 zifenw 1001409 12099 Oct 29 10:16 server.cpp
+drwx------. 2 zifenw 1001409   191 Oct 29 12:21 testfiles
+bash-4.4$ find . -maxdepth 2 -type f
+./downloads/netascii_test.txt
+./downloads/nonexistent_xyz.bin
+./downloads/netascii_boundary.txt
+./downloads/test2047.bin
+./downloads/test2048.bin
+./downloads/test34MB.bin
+./server.cpp
+./testfiles/netascii_test.txt
+./testfiles/netascii_boundary.txt
+./testfiles/hello.txt
+./testfiles/test2047.bin
+./testfiles/test2048.bin
+./testfiles/test34MB.bin
+./Makefile
+./README
+./server
+```
+
+```text
+bash-4.4$ cd ~/EE602/MP3/downloads/client2
+bash-4.4$ tftp 127.0.0.1 9000
+tftp> mode netascii
+tftp> get netascii_boundary.txt
+tftp> quit
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ cmp testfiles/test2048.bin downloads/client1/t
+est2048.bin
+bash-4.4$ cmp testfiles/netascii_boundary.txt downloads/
+client2/netascii_boundary.txt
+bash-4.4$ cd ~/EE602/MP3
+bash-4.4$ 
+
+```

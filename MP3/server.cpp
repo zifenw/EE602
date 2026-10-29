@@ -14,6 +14,8 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <cctype>
+#include <cstdlib>
 
 constexpr size_t BLOCK_SIZE = 512;
 constexpr int TIMEOUT_SEC = 1;
@@ -53,9 +55,70 @@ bool same_client(const sockaddr_in& a, const sockaddr_in& b) {
            a.sin_port == b.sin_port;
 }
 
+struct NetasciiReader {
+    int fd;
+    unsigned char input[4096];
+    size_t pos = 0;
+    size_t len = 0;
+    int pending = -1;
+    bool eof = false;
+};
+
+// Return the next original byte, or -1 at EOF/error.
+int next_input_byte(NetasciiReader &r) {
+    if (r.pos == r.len) {
+        if (r.eof) return -1;
+
+        ssize_t n = read(r.fd, r.input, sizeof(r.input));
+        if (n <= 0) {
+            r.eof = true;
+            return -1;
+        }
+
+        r.pos = 0;
+        r.len = static_cast<size_t>(n);
+    }
+
+    return r.input[r.pos++];
+}
+
+// Fill up to 512 bytes of netascii output.
+// pending preserves the second byte of a conversion if needed.
+ssize_t fill_netascii_block(NetasciiReader &r,
+                            unsigned char out[512]) {
+    size_t used = 0;
+
+    while (used < 512) {
+        if (r.pending != -1) {
+            out[used++] = static_cast<unsigned char>(r.pending);
+            r.pending = -1;
+            continue;
+        }
+
+        int c = next_input_byte(r);
+        if (c == -1) break;
+
+        if (c == '\n' || c == '\r') {
+            out[used++] = '\r';
+            int second = (c == '\n') ? '\n' : '\0';
+
+            if (used < 512) {
+                out[used++] = static_cast<unsigned char>(second);
+            } else {
+                r.pending = second;
+            }
+        } else {
+            out[used++] = static_cast<unsigned char>(c);
+        }
+    }
+
+    return static_cast<ssize_t>(used);
+}
+
 // Read and send a file using TFTP octet mode.
 void serve_rrq(int sockfd, const sockaddr_in& client,
-               socklen_t client_len, const std::string& filename) {
+               socklen_t client_len, const std::string &filename,
+               const std::string &mode) {
     // Restrict access to a simple filename in the current directory.
     if (filename.empty() || filename == "." || filename == ".." ||
         filename.find('/') != std::string::npos ||
@@ -80,6 +143,9 @@ void serve_rrq(int sockfd, const sockaddr_in& client,
         return;
     }
 
+    NetasciiReader reader{};
+    reader.fd = fd;
+
     uint16_t block = 1;
     bool finished = false;
 
@@ -87,12 +153,13 @@ void serve_rrq(int sockfd, const sockaddr_in& client,
         unsigned char packet[4 + BLOCK_SIZE];
         ssize_t n;
 
-        // Read one block. A zero-byte block marks EOF when
-        // the file size is an exact multiple of 512 bytes.
-        do {
-            n = read(fd, packet + 4, BLOCK_SIZE);
-        } while (n < 0 && errno == EINTR);
-
+        if (mode == "netascii") {
+            n = fill_netascii_block(reader, packet + 4);
+        } else {
+            do {
+                n = read(fd, packet + 4, BLOCK_SIZE);
+            } while (n < 0 && errno == EINTR);
+        }
         if (n < 0) {
             send_error(sockfd, client, client_len, 0,
                        "File read error");
@@ -306,9 +373,9 @@ int main(int argc, char* argv[]) {
                 std::tolower(static_cast<unsigned char>(c)));
         }
 
-        if (mode != "octet") {
+        if (mode != "octet" && mode != "netascii") {
             send_error(sockfd, client, client_len, 4,
-                       "Only octet mode is implemented");
+                       "Unsupported transfer mode");
             continue;
         }
 
@@ -347,7 +414,7 @@ int main(int argc, char* argv[]) {
                 _exit(1);
             }
 
-            serve_rrq(child_sock, client, client_len, filename);
+            serve_rrq(child_sock, client, client_len, filename, mode);
             close(child_sock);
             _exit(0);
         }
